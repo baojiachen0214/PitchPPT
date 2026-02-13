@@ -1,0 +1,77 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*.bak
+
+# Build and Distribution
+build/
+dist/
+*.manifest
+*.pyc
+
+# Logs
+logs/
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Project specific - PitchPPT
+# Temporary files and directories created during conversion
+temp/
+tmp/
+*_temp/
+*_tmp/
+
+# Output files (user generated)
+*_converted.pptx
+*_converted_*.pptx
+output/
+outputs/
+
+# History and config (user specific)
+history.json
+config.json
+
+# Test outputs
+tests/output/
+tests/temp/
+tests/__pycache__/
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Documentation build
+docs/_build/
+
+# Windows
+*.exe
+*.dll
+*.pdb
