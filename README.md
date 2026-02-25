@@ -19,7 +19,7 @@
   <a href="https://gitee.com/bao-jiachen/PitchPPT.git">
     <img src="https://img.shields.io/badge/Gitee-Repository-red?style=flat-square" alt="Gitee">
   </a>
-  <img src="https://img.shields.io/badge/Version-1.6.0-green?style=flat-square" alt="Version">
+  <img src="https://img.shields.io/badge/Version-1.7.2-green?style=flat-square" alt="Version">
   <img src="https://img.shields.io/badge/License-AGPLv3-purple?style=flat-square" alt="License">
 </p>
 

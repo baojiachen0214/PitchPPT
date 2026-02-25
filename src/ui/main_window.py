@@ -728,7 +728,7 @@ class MainWindow(QMainWindow):
         status_right_layout.addWidget(help_label)
         
         # 版本号
-        version_label = QLabel("v1.6.0")
+        version_label = QLabel("v1.7.2")
         version_label.setStyleSheet("color: #9ca3af; font-size: 11px;")
         status_right_layout.addWidget(version_label)
         
@@ -1357,10 +1357,12 @@ class MainWindow(QMainWindow):
         self.output_format_combo.addItem("📊 PowerPoint (PPTX)", "pptx")
         self.output_format_combo.setVisible(False)
         
-        # 转换模式 - 固定使用背景填充模式
+        # 转换模式 - 支持背景填充/前景覆盖
         self.mode_combo = QComboBox()
         self.mode_combo.addItem("🎨 背景填充模式", "background_fill")
-        self.mode_combo.setVisible(False)
+        self.mode_combo.addItem("🖼️ 前景覆盖模式（完全覆盖）", "foreground_image")
+        self.mode_combo.setToolTip("背景填充：将图片设为幻灯片背景\n前景覆盖：将图片作为前景对象并完全覆盖幻灯片")
+        layout.addRow("图片覆盖方式:", self.mode_combo)
         
         # 幻灯片范围 - 修复显示逻辑
         slide_range_layout = QHBoxLayout()
@@ -1450,10 +1452,14 @@ class MainWindow(QMainWindow):
         self.algorithm_combo.addItem("平均配额算法", "v4")
         self.algorithm_combo.addItem("双轮优化算法", "v5")
         self.algorithm_combo.addItem("迭代优化算法", "v6")
+        self.algorithm_combo.addItem("预算驱动画质算法（V7）", "v7")
+        self.algorithm_combo.addItem("联合优化算法（V8）", "v8")
         self.algorithm_combo.setToolTip(
             "平均配额算法: 每页使用相同配额，快速完成\n"
             "双轮优化算法: 第一轮平均配额，第二轮根据实际结果调整配额\n"
-            "迭代优化算法: 根据内容复杂度分配配额，画质更均衡"
+            "迭代优化算法: 根据内容复杂度分配配额，画质更均衡\n"
+            "预算驱动画质算法(V7): 二点建模+预算水位分配+局部精修，在限定体积内优先提升复杂页清晰度\n"
+            "联合优化算法(V8): 每页联合优化格式(PNG/JPEG)+高度+JPEG质量，提升有限体积下可读性"
         )
         smart_options_layout.addRow("处理算法:", self.algorithm_combo)
         
@@ -2999,6 +3005,11 @@ class MainWindow(QMainWindow):
                 output_path,
                 target_size_mb,
                 algorithm=algorithm,
+                conversion_mode={
+                    "background_fill": ConversionMode.BACKGROUND_FILL,
+                    "foreground_image": ConversionMode.FOREGROUND_IMAGE,
+                    "slide_to_image": ConversionMode.SLIDE_TO_IMAGE
+                }[self.mode_combo.currentData()],
                 include_hidden_slides=self.include_hidden_checkbox.isChecked(),
                 logger=self.logger
             )
@@ -3032,10 +3043,15 @@ class MainWindow(QMainWindow):
             
             # 构建转换选项
             options = ConversionOptions()
+            mode_data = self.mode_combo.currentData()
+            options.mode = {
+                "background_fill": ConversionMode.BACKGROUND_FILL,
+                "foreground_image": ConversionMode.FOREGROUND_IMAGE,
+                "slide_to_image": ConversionMode.SLIDE_TO_IMAGE
+            }[mode_data]
             
             if not is_smart_mode:
                 # 普通模式：设置转换选项
-                mode_data = self.mode_combo.currentData()
                 output_ext = self.output_format_combo.currentData() or "pptx"
                 
                 if output_ext == "pdf":

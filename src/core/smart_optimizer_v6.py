@@ -25,8 +25,12 @@ import zipfile
 import xml.etree.ElementTree as ET
 from typing import List, Optional, Callable, Tuple
 from dataclasses import dataclass, field
-from core.win32_converter import Win32PPTConverter
-from utils.logger import Logger
+try:
+    from src.core.win32_converter import Win32PPTConverter
+    from src.utils.logger import Logger
+except ImportError:
+    from core.win32_converter import Win32PPTConverter
+    from utils.logger import Logger
 
 
 @dataclass

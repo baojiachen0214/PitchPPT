@@ -1043,10 +1043,21 @@ class Win32PPTConverter(PPTConverter):
             
             # 创建新的演示文稿
             new_presentation = self.powerpoint.Presentations.Add()
-            
-            # 设置幻灯片大小与原始一致
-            new_presentation.PageSetup.SlideWidth = presentation.PageSetup.SlideWidth
-            new_presentation.PageSetup.SlideHeight = presentation.PageSetup.SlideHeight
+
+            # 强制同步新旧PPT页面尺寸，避免前景覆盖时出现拉伸
+            source_slide_size = presentation.PageSetup.SlideSize
+            source_slide_width = presentation.PageSetup.SlideWidth
+            source_slide_height = presentation.PageSetup.SlideHeight
+            try:
+                new_presentation.PageSetup.SlideSize = source_slide_size
+            except Exception as e:
+                self.logger.warning(f"设置SlideSize失败，将仅使用宽高同步: {e}")
+            new_presentation.PageSetup.SlideWidth = source_slide_width
+            new_presentation.PageSetup.SlideHeight = source_slide_height
+            self.logger.info(
+                f"[前景模式] 源尺寸={source_slide_width:.2f}x{source_slide_height:.2f}, "
+                f"目标尺寸={new_presentation.PageSetup.SlideWidth:.2f}x{new_presentation.PageSetup.SlideHeight:.2f}"
+            )
             
             for i, image_file in enumerate(image_files, 1):
                 # 添加新幻灯片

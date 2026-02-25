@@ -13,10 +13,13 @@ import logging
 import threading
 from typing import Optional, Callable, List
 from PyQt5.QtCore import QThread, pyqtSignal
+from PIL import Image
 
 from src.core.smart_optimizer_v4 import SmartOptimizerV4, OptimizationResult, PageOptimizationResult
 from src.core.smart_optimizer_v5 import SmartOptimizerV5
 from src.core.smart_optimizer_v6 import SmartOptimizerV6
+from src.core.smart_optimizer_v7 import SmartOptimizerV7
+from src.core.smart_optimizer_v8 import SmartOptimizerV8
 from src.core.converter import ConversionOptions, ConversionMode, OutputFormat, ImageFormat
 
 
@@ -34,6 +37,7 @@ class SmartOptimizationWorkerV4(QThread):
                  target_size_mb: float,
                  dpi: int = 96,
                  algorithm: str = "v4",
+                 conversion_mode: ConversionMode = ConversionMode.BACKGROUND_FILL,
                  include_hidden_slides: bool = True,
                  logger: Optional[logging.Logger] = None):
         super().__init__()
@@ -43,8 +47,10 @@ class SmartOptimizationWorkerV4(QThread):
         self.target_size_mb = target_size_mb
         self.dpi = dpi
         self.algorithm = algorithm
+        self.conversion_mode = conversion_mode
         self.include_hidden_slides = include_hidden_slides
         self.logger = logger or logging.getLogger(__name__)
+        self._page_image_settings = None
         
         # 控制标志
         self._paused = False
@@ -100,7 +106,7 @@ class SmartOptimizationWorkerV4(QThread):
             self.logger.error(traceback.format_exc())
     
     def _export_with_page_heights(self, page_heights: List[int], aspect_ratio: float,
-                                  progress_callback=None) -> bool:
+                                  progress_callback=None, page_image_settings: Optional[List[dict]] = None) -> bool:
         """
         使用每页的最优高度导出完整PPT
         
@@ -137,6 +143,7 @@ class SmartOptimizationWorkerV4(QThread):
                 
                 try:
                     slide_count = pres.Slides.Count
+                    slide_aspect_ratio = pres.PageSetup.SlideWidth / pres.PageSetup.SlideHeight
                     
                     temp_dir = converter._create_temp_dir(prefix="smart_export_")
                     
@@ -164,16 +171,42 @@ class SmartOptimizationWorkerV4(QThread):
                             return False
                         
                         optimal_height = page_heights[height_index]
+                        image_setting = None
+                        if page_image_settings and height_index < len(page_image_settings):
+                            image_setting = page_image_settings[height_index]
                         height_index += 1
-                        optimal_width = int(optimal_height * aspect_ratio)
-                        
-                        png_path = os.path.join(temp_dir, f"slide_{page_num:03d}.png")
-                        
-                        slide.Export(png_path, "PNG", optimal_width, optimal_height)
-                        
-                        image_files.append(png_path)
+                        optimal_width = int(optimal_height * slide_aspect_ratio)
+
+                        image_path = os.path.join(temp_dir, f"slide_{page_num:03d}.png")
+                        exported_ok = False
+
+                        if image_setting:
+                            try:
+                                from src.core.converter import ImageExportConfig, ImageFormat
+                                fmt = (image_setting.get('format') or "png").lower()
+                                quality = int(image_setting.get('quality', 95))
+                                ext = "jpg" if fmt in ("jpg", "jpeg") else fmt
+                                image_path = os.path.join(temp_dir, f"slide_{page_num:03d}.{ext}")
+
+                                cfg = ImageExportConfig()
+                                cfg.format = ImageFormat(fmt)
+                                cfg.quality = max(1, min(100, quality))
+                                cfg.use_custom_resolution = True
+                                cfg.custom_height = optimal_height
+                                cfg.custom_width = 0
+                                cfg.maintain_aspect_ratio = True
+                                cfg.optimize = True
+                                cfg.progressive = True
+                                exported_ok = converter._export_slide_to_image(slide, image_path, cfg, pres)
+                            except Exception as e:
+                                self.logger.warning(f"第{page_num}页按V8参数导出失败，回退PNG: {e}")
+
+                        if not exported_ok:
+                            slide.Export(image_path, "PNG", optimal_width, optimal_height)
+
+                        image_files.append(image_path)
                         exported_page_indices.append(page_num)
-                        self.logger.info(f"  第{page_num}页: H={optimal_height}px")
+                        self.logger.info(f"  第{page_num}页: H={optimal_height}px, file={os.path.basename(image_path)}")
                     
                     if not image_files:
                         self.logger.error("没有成功导出任何幻灯片")
@@ -181,88 +214,143 @@ class SmartOptimizationWorkerV4(QThread):
                     
                     if progress_callback:
                         progress_callback("正在创建新PPT...", 90)
-                    
-                    template_path = os.path.join(temp_dir, "template.pptx")
+
+                    use_foreground_cover = (self.conversion_mode == ConversionMode.FOREGROUND_IMAGE)
+                    new_pres = None
+
                     try:
-                        pres.SaveAs(template_path)
-                    except Exception as e:
-                        self.logger.error(f"保存模板PPT失败: {e}")
-                        return False
-                    
-                    try:
-                        pres.Close()
-                    except Exception as e:
-                        self.logger.warning(f"关闭原始PPT失败（可能已自动关闭）: {e}")
-                    
-                    new_pres = converter.powerpoint.Presentations.Open(template_path)
-                    
-                    try:
-                        if not self.include_hidden_slides:
-                            slides_to_delete = []
-                            for i in range(1, new_pres.Slides.Count + 1):
-                                slide = new_pres.Slides(i)
-                                if slide.SlideShowTransition.Hidden:
-                                    slides_to_delete.append(i)
-                            
-                            for slide_idx in reversed(slides_to_delete):
+                        if use_foreground_cover:
+                            # 前景覆盖模式：新建空白PPT，避免继承原文件母版数据
+                            new_pres = converter.powerpoint.Presentations.Add()
+                            try:
                                 try:
-                                    new_pres.Slides(slide_idx).Delete()
-                                    self.logger.info(f"删除隐藏幻灯片 {slide_idx}")
+                                    new_pres.PageSetup.SlideSize = pres.PageSetup.SlideSize
                                 except Exception as e:
-                                    self.logger.warning(f"删除隐藏幻灯片 {slide_idx} 失败: {e}")
-                        
-                        while new_pres.Slides.Count < len(image_files):
-                            last_slide = new_pres.Slides(new_pres.Slides.Count)
-                            last_slide.Duplicate()
-                        
+                                    self.logger.warning(f"设置SlideSize失败，将仅同步宽高: {e}")
+                                new_pres.PageSetup.SlideWidth = pres.PageSetup.SlideWidth
+                                new_pres.PageSetup.SlideHeight = pres.PageSetup.SlideHeight
+                                self.logger.info(
+                                    f"[前景覆盖] 源尺寸={pres.PageSetup.SlideWidth:.2f}x{pres.PageSetup.SlideHeight:.2f}, "
+                                    f"目标尺寸={new_pres.PageSetup.SlideWidth:.2f}x{new_pres.PageSetup.SlideHeight:.2f}"
+                                )
+                            except Exception as e:
+                                self.logger.warning(f"设置新PPT尺寸失败，使用默认尺寸: {e}")
+                        else:
+                            template_path = os.path.join(temp_dir, "template.pptx")
+                            try:
+                                pres.SaveAs(template_path)
+                            except Exception as e:
+                                self.logger.error(f"保存模板PPT失败: {e}")
+                                return False
+                            new_pres = converter.powerpoint.Presentations.Open(template_path)
+
+                            if not self.include_hidden_slides:
+                                slides_to_delete = []
+                                for i in range(1, new_pres.Slides.Count + 1):
+                                    slide = new_pres.Slides(i)
+                                    if slide.SlideShowTransition.Hidden:
+                                        slides_to_delete.append(i)
+
+                                for slide_idx in reversed(slides_to_delete):
+                                    try:
+                                        new_pres.Slides(slide_idx).Delete()
+                                        self.logger.info(f"删除隐藏幻灯片 {slide_idx}")
+                                    except Exception as e:
+                                        self.logger.warning(f"删除隐藏幻灯片 {slide_idx} 失败: {e}")
+
+                            while new_pres.Slides.Count < len(image_files):
+                                last_slide = new_pres.Slides(new_pres.Slides.Count)
+                                last_slide.Duplicate()
+
                         for i, image_file in enumerate(image_files, 1):
                             if self._stopped:
                                 return False
-                            
-                            if i <= new_pres.Slides.Count:
-                                if progress_callback:
-                                    progress = 90 + int((i / len(image_files)) * 8)
-                                    progress_callback(f"正在设置第{i}/{len(image_files)}页背景...", progress)
-                                
+
+                            if progress_callback:
+                                progress = 90 + int((i / len(image_files)) * 8)
+                                mode_text = "前景覆盖" if use_foreground_cover else "背景"
+                                progress_callback(f"正在设置第{i}/{len(image_files)}页{mode_text}...", progress)
+
+                            if use_foreground_cover:
+                                if i > new_pres.Slides.Count:
+                                    slide = new_pres.Slides.Add(i, 12)  # ppLayoutBlank
+                                else:
+                                    slide = new_pres.Slides(i)
+                                    slide.Layout = 12
+                            elif i <= new_pres.Slides.Count:
                                 slide = new_pres.Slides(i)
-                                
-                                try:
-                                    # 删除所有形状
-                                    for shape_idx in range(slide.Shapes.Count, 0, -1):
-                                        try:
-                                            slide.Shapes(shape_idx).Delete()
-                                        except:
-                                            pass
-                                    
-                                    # 设置背景填充为图片（使用绝对路径）
+                            else:
+                                continue
+
+                            try:
+                                for shape_idx in range(slide.Shapes.Count, 0, -1):
+                                    try:
+                                        slide.Shapes(shape_idx).Delete()
+                                    except Exception:
+                                        pass
+
+                                abs_image_path = os.path.abspath(image_file)
+                                if use_foreground_cover:
+                                    slide_width = new_pres.PageSetup.SlideWidth
+                                    slide_height = new_pres.PageSetup.SlideHeight
+                                    with Image.open(abs_image_path) as img:
+                                        img_width, img_height = img.size
+                                        img_ratio = img_width / img_height
+                                        slide_ratio = slide_width / slide_height
+
+                                    if img_ratio > slide_ratio:
+                                        scaled_height = slide_height
+                                        scaled_width = int(scaled_height * img_ratio)
+                                    else:
+                                        scaled_width = slide_width
+                                        scaled_height = int(scaled_width / img_ratio)
+
+                                    left = (slide_width - scaled_width) // 2
+                                    top = (slide_height - scaled_height) // 2
+
+                                    picture = slide.Shapes.AddPicture(
+                                        FileName=abs_image_path,
+                                        LinkToFile=False,
+                                        SaveWithDocument=True,
+                                        Left=left,
+                                        Top=top,
+                                        Width=scaled_width,
+                                        Height=scaled_height
+                                    )
+                                    try:
+                                        picture.ZOrder(1)
+                                    except Exception:
+                                        pass
+                                else:
                                     slide.FollowMasterBackground = False
-                                    abs_image_path = os.path.abspath(image_file)
                                     slide.Background.Fill.UserPicture(abs_image_path)
-                                    
-                                except Exception as e:
+                            except Exception as e:
+                                if use_foreground_cover:
+                                    self.logger.warning(f"设置第{i}页前景覆盖失败: {e}")
+                                else:
                                     self.logger.warning(f"设置第{i}页背景失败: {e}")
-                        
-                        # 保存新PPT
+
                         if progress_callback:
                             progress_callback("正在保存文件...", 98)
-                        
+
                         new_pres.SaveAs(os.path.abspath(self.output_path))
                         self.logger.info(f"PPT已保存: {self.output_path}")
-                        
                         return True
-                        
                     finally:
+                        if new_pres is not None:
+                            try:
+                                new_pres.Close()
+                            except Exception as e:
+                                self.logger.warning(f"关闭新PPT失败: {e}")
+
                         try:
-                            new_pres.Close()
-                        except Exception as e:
-                            self.logger.warning(f"关闭新PPT失败: {e}")
+                            pres.Close()
+                        except Exception:
+                            pass
                     
                 finally:
-                    try:
-                        pres.Close()
-                    except:
-                        pass
-                    
+                    pass
+
             finally:
                 converter._cleanup()
                 
@@ -397,7 +485,12 @@ class SmartOptimizationWorkerV4(QThread):
                     progress_callback(f"最终微调中(步长{step_size}px)...", progress_percent)
                 
                 # 重新导出
-                success = self._export_with_page_heights(adjusted_heights, opt_result.aspect_ratio, None)
+                success = self._export_with_page_heights(
+                    adjusted_heights,
+                    opt_result.aspect_ratio,
+                    None,
+                    self._page_image_settings
+                )
                 
                 if not success:
                     self.logger.warning(f"  微调导出失败，跳过此步骤")
@@ -441,7 +534,12 @@ class SmartOptimizationWorkerV4(QThread):
             current_heights = last_valid['heights']
             
             # 重新导出
-            success = self._export_with_page_heights(current_heights, opt_result.aspect_ratio, None)
+            success = self._export_with_page_heights(
+                current_heights,
+                opt_result.aspect_ratio,
+                None,
+                self._page_image_settings
+            )
             if success:
                 final_size_mb = os.path.getsize(self.output_path) / (1024 * 1024)
                 self.logger.info(f"  回退后大小: {final_size_mb:.2f}MB")
@@ -478,6 +576,12 @@ class SmartOptimizationWorkerV4(QThread):
             if self.algorithm == "v6":
                 optimizer = SmartOptimizerV6(include_hidden_slides=self.include_hidden_slides)
                 self.logger.info("使用复杂度自适应算法 V6")
+            elif self.algorithm == "v8":
+                optimizer = SmartOptimizerV8(include_hidden_slides=self.include_hidden_slides)
+                self.logger.info("使用联合优化算法 V8（格式+高度+质量）")
+            elif self.algorithm == "v7":
+                optimizer = SmartOptimizerV7(include_hidden_slides=self.include_hidden_slides)
+                self.logger.info("使用预算驱动感知优化算法 V7")
             elif self.algorithm == "v5":
                 optimizer = SmartOptimizerV5(include_hidden_slides=self.include_hidden_slides)
                 self.logger.info("使用迭代优化算法 V5")
@@ -507,8 +611,20 @@ class SmartOptimizationWorkerV4(QThread):
             
             # ========== Phase 2: 使用每页最优高度导出 ==========
             page_heights = [r.optimal_height for r in opt_result.page_results]
+            self._page_image_settings = [
+                {
+                    'format': getattr(r, 'image_format', 'png'),
+                    'quality': int(getattr(r, 'image_quality', 95))
+                }
+                for r in opt_result.page_results
+            ]
             
-            success = self._export_with_page_heights(page_heights, opt_result.aspect_ratio, self._progress_callback)
+            success = self._export_with_page_heights(
+                page_heights,
+                opt_result.aspect_ratio,
+                self._progress_callback,
+                self._page_image_settings
+            )
             
             if self._stopped:
                 self.logger.info("智能处理被用户终止")
